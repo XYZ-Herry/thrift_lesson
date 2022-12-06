@@ -8,6 +8,11 @@
 #include <thrift/transport/TBufferTransports.h>
 
 #include <iostream>
+#include <thread>               // 需要线程，引入头文件
+#include <mutex>                // 互斥信号量
+#include <condition_variable>   // 条件变量，用于 阻塞和唤醒 线程
+#include <queue>                // 用于模拟消息队列
+#include <vector>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -17,55 +22,147 @@ using namespace ::apache::thrift::server;
 using namespace  ::match_service;
 using namespace std;
 
-class MatchHandler : virtual public MatchIf {
- public:
-  MatchHandler() {
-    // Your initialization goes here
-  }
-
-  /**
-   * user: 添加的用户信息
-   * info: 附加信息
-   * 在匹配池中添加一个名用户
-   * 
-   * @param user
-   * @param info
-   */
-  int32_t add_user(const User& user, const std::string& info) {
-    // Your implementation goes here
-    printf("add_user\n");
-    return 0;
-  }
-
-  /**
-   * user: 删除的用户信息
-   * info: 附加信息
-   * 从匹配池中删除一名用户
-   * 
-   * @param user
-   * @param info
-   */
-  int32_t remove_user(const User& user, const std::string& info) {
-    // Your implementation goes here
-    printf("remove_user\n");
-    return 0;
-  }
-
+struct Task //消息队列中的元素
+{
+    User user;
+    string type;
 };
 
+struct MessageQueue //消息队列
+{
+    queue<Task> q;          //消息队列本体
+    mutex m;                //互斥信号量
+    condition_variable cv;  //条件变量，用于阻塞唤醒线程
+}message_queue;
+
+
+class Pool  // 模拟匹配池
+{
+    public:
+        void save_result(int a, int b)  // 记录成功匹配的信息
+        {
+            printf("Match Result: %d %d\n", a, b);
+        }
+
+        void match()    // 匹配池中的第一、第二个用户进行匹配
+        {
+            while (users.size() > 1)
+            {
+                auto a = users[0], b = users[1];
+                users.erase(users.begin());
+                users.erase(users.begin());
+
+                save_result(a.id, b.id);
+            }
+        }
+
+        void add(User user) // 向匹配池中加入用户
+        {
+            users.push_back(user);
+        }
+
+        void remove(User user)  // 从匹配池中删除用户
+        {
+            for (uint32_t i = 0; i < users.size(); i ++ )
+            {
+                if (users[i].id == user.id)
+                {
+                    users.erase(users.begin() + i);
+                    break;
+                }
+            }
+        }
+
+    private:
+        vector<User> users; // 匹配池中的用户，用 vector 记录
+}pool;
+
+class MatchHandler : virtual public MatchIf {
+    public:
+        MatchHandler() {
+            // Your initialization goes here
+        }
+
+        /**
+         * user: 添加的用户信息
+         * info: 附加信息
+         * 在匹配池中添加一个名用户
+         * 
+         * @param user
+         * @param info
+         */
+        int32_t add_user(const User& user, const std::string& info) {
+            // Your implementation goes here
+            printf("add_user\n");
+
+            unique_lock<mutex> lck(message_queue.m);    // 访问临界区(消息队列)，先上锁
+            message_queue.q.push({user, "add"});        // 把新消息加入消息队列
+            message_queue.cv.notify_all();              // 唤醒阻塞的线程i;
+            return 0;
+        }
+
+        /**
+         * user: 删除的用户信息
+         * info: 附加信息
+         * 从匹配池中删除一名用户
+         * 
+         * @param user
+         * @param info
+         */
+        int32_t remove_user(const User& user, const std::string& info) {
+            // Your implementation goes here
+            printf("remove_user\n");
+
+            unique_lock<mutex> lck(message_queue.m);    // 访问临界区(消息队列)，先上锁
+            message_queue.q.push({user, "remove"});     // 把新消息加入消息队列
+            message_queue.cv.notify_all();              // 唤醒阻塞的线程;
+            return 0;
+        }
+
+};
+//基于“生产者-消费者模型”的线程
+void consume_task()
+{
+    while (true)
+    {
+        unique_lock<mutex> lck(message_queue.m);    // 访问临界区(消息队列)，先上锁
+
+        if (message_queue.q.empty())
+        {
+            message_queue.cv.wait(lck);     //这里要阻塞进程
+            // 避免队列为空时，一直反复运行该线程，导致一直占用临界区，而不能加入新消息
+        }
+        else
+        {
+            auto task = message_queue.q.front();    // 取出消息队列队头元素
+            message_queue.q.pop();
+
+            lck.unlock();   // 临界区访问结束，直接解锁
+            // 避免后续没用到临界区信息，而长时间占用临界区的情况发生
+
+            if (task.type == "add") pool.add(task.user);
+            else if (task.type == "remove") pool.remove(task.user);
+
+            pool.match();
+        }
+    }
+}
+
 int main(int argc, char **argv) {
-  int port = 9090;
-  ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
-  ::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
-  ::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
-  ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
-  ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
+    int port = 9090;
+    ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
+    ::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
+    ::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
+    ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
+    ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
 
-  TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
+    TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
 
-  cout << "Start Match Server" << endl;
+    cout << "Start Match Server" << endl;
 
-  server.serve();
-  return 0;
+    thread matching_thread(consume_task); //调用一个线程运行 consume_task
+
+    server.serve();
+    return 0;
 }
 
