@@ -15,6 +15,7 @@
 #include <condition_variable>   // 条件变量，用于 阻塞和唤醒 线程
 #include <queue>                // 用于模拟消息队列
 #include <vector>
+#include <unistd.h>// 用于调用 sleep 函数
 
 using namespace ::save_service;
 using namespace ::apache::thrift;
@@ -70,11 +71,26 @@ class Pool  // 模拟匹配池
         {
             while (users.size() > 1)
             {
-                auto a = users[0], b = users[1];
-                users.erase(users.begin());
-                users.erase(users.begin());
+                // 按照 rank分 排序
+                sort(users.begin(), users.end(), [&](User &a, User &b){
+                    return a.score < b.score;
+                });
+                bool flag = true;
+                for (uint32_t i = 1; i < users.size(); i ++ )
+                {
+                    User a = users[i - 1], b = users[i];
+                    // 两名玩家分数差小于50时进行匹配
+                    if (b.score - a.score <= 50)
+                    {
+                        users.erase(users.begin() + i - 1, users.begin() + i + 1); //删掉用户a,b
+                        save_result(a.id, b.id);
 
-                save_result(a.id, b.id);
+                        flag = false;
+                        break;
+                    }
+                }
+                if (flag) break;    // 一轮扫描后，发现没有能够匹配的用户，就停止扫描，等待下次调用
+
             }
         }
 
@@ -119,7 +135,7 @@ class MatchHandler : virtual public MatchIf {
 
             unique_lock<mutex> lck(message_queue.m);    // 访问临界区(消息队列)，先上锁
             message_queue.q.push({user, "add"});        // 把新消息加入消息队列
-            message_queue.cv.notify_all();              // 唤醒阻塞的线程i;
+            message_queue.cv.notify_all();              // 唤醒阻塞的线程;
             return 0;
         }
 
@@ -151,8 +167,10 @@ void consume_task()
 
         if (message_queue.q.empty())
         {
-            message_queue.cv.wait(lck);     //这里要阻塞进程
-            // 避免队列为空时，一直反复运行该线程，导致一直占用临界区，而不能加入新消息
+            // 此处修改为每 1 秒进行一次匹配，而不是等到被唤醒时才匹配
+            lck.unlock();   // 直接解锁临界区资源
+            pool.match();     //调用match()
+            sleep(1);
         }
         else
         {
