@@ -23,12 +23,12 @@
 #include <vector>
 #include <unistd.h>// 用于调用 sleep 函数
 
-using namespace ::save_service;
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
 using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
 
+using namespace ::save_service;
 using namespace ::match_service;
 using namespace std;
 
@@ -52,6 +52,7 @@ class Pool  // 模拟匹配池
         void save_result(int a, int b)  // 记录成功匹配的信息
         {
             printf("Match Result: %d %d\n", a, b);
+            cout << "123123" << endl;
             // Client端的板子
             std::shared_ptr<TTransport> socket(new TSocket("123.57.47.211", 9090));
             std::shared_ptr<TTransport> transport(new TBufferedTransport(socket));
@@ -95,23 +96,23 @@ class Pool  // 模拟匹配池
                     {
                         if (check(i, j))
                         {
+                            auto a = users[i], b = users[j];
                             users.erase(users.begin() + j);
                             users.erase(users.begin() + i);
                             wt.erase(wt.begin() + j);
                             wt.erase(wt.begin() + i);
 
-                            save_result(users[i].id, users[j].id);
+                            save_result(a.id, b.id);
                             flag = false;
                             break;
                         }
-                        if (!flag) break;
                     }
+                    if (!flag) break;
                 }
                 if (flag) break;    // 一轮扫描后，发现没有能够匹配的用户，就停止扫描，等待下次调用
             }
 
         }
-
         void add(User user) // 向匹配池中加入用户
         {
             users.push_back(user);
@@ -196,7 +197,7 @@ class MatchCloneFactory : virtual public MatchIfFactory {
                */
             return new MatchHandler;
         }
-        void releaseHandler(MatchIf* handler) override {    //改为MatchIf*  
+        void releaseHandler(MatchIf* handler) override {    //改为MatchIf*
             delete handler;
         }
 };
